@@ -13,7 +13,7 @@ Bu fayl GitHub'da saqlanadi va launcher.py orqali har ishga tushganda
 avtomatik yangilanadi — bu yerni tahrirlash = barcha foydalanuvchilarning
 dasturi keyingi ochilishda yangilanadi degani.
 """
-__version__ = "2026-09-09.2"
+__version__ = "2026-10-02.1"
 
 import os
 import re
@@ -110,7 +110,15 @@ UNIT_MAP = {
     "компл": "комплект", "компл.": "комплект", "к-т": "комплект",
     "пар": "пара",
     "пач": "пачка", "пач.": "пачка",
+    # 2026-10-02: haqiqiy fakturalarda uchragan, ilgari tanilmagan yozuvlar
+    "комплект": "комплект", "комплект/набор": "комплект / набор", "набор": "комплект / набор",
+    "nabor": "комплект / набор",
+    # SmartPOS ro'yxatida "лист" yo'q - ЛДСП/ДСП listlari donalab sotiladi
+    "лист": "штук", "varaq": "штук", "list": "штук",
 }
+
+# Taxminiy moslik - ogohlantirish bilan (buxgalter tekshirsin)
+APPROX_UNITS = {"лист", "varaq", "list"}
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +180,8 @@ def _resolve_field_indices(header_map):
             claim("qty", col)
         elif "нарҳ" in low or "нарх" in low or low.strip() == "цена":
             claim("price", col)
+        elif "қиймат" in low and "ққс" not in low:
+            claim("amount", col)       # "Етказиб бериш қиймати" = миқдор x нарҳ (ҚҚС сиз)
         elif "ққс" in low or "ндс" in low:
             claim("vat", col)
     return idx
@@ -246,17 +256,31 @@ def _diagnose_missing_table(soup, html):
 
 
 def map_unit(raw, warnings, name):
-    base = re.sub(r"\(.*?\)", "", raw).strip().lower()
+    # "to’plam" (’ U+2019), "toʻplam" - hammasi oddiy apostrofga
+    norm = re.sub(r"[’‘ʼʻ`]", "'", raw)
+    base = re.sub(r"\(.*?\)", "", norm).strip().lower()
     if base in UNIT_MAP:
         return UNIT_MAP[base]
     if base in UNITS:
         return base
+    # "лист=5,0325 квадратный метр", "komplekt/to‘plam=6 dona" - "=" dan keyingisi izoh
+    head = re.sub(r"\s*=.*$", "", base).strip()
+    if head in UNIT_MAP:
+        if head in APPROX_UNITS:
+            warnings.append(f"  - '{name[:60]}': o'lchov birligi '{raw}' SmartPOS ro'yxatida yo'q, "
+                            f"'{UNIT_MAP[head]}' deb yozildi — tekshiring")
+        return UNIT_MAP[head]
+    if head in UNITS:
+        return head
 
     # "потребительская коробка=1 шт" kabi tavsifiy matn ichidan ham
     # tanish so'zni (masalan "шт") alohida so'z sifatida qidiramiz —
     # eng uzun kalitdan boshlab, noto'g'ri qisman moslikni oldini olish uchun.
     for key in sorted(UNIT_MAP, key=len, reverse=True):
         if re.search(rf"(?<!\w){re.escape(key)}(?!\w)", base):
+            if key in APPROX_UNITS:
+                warnings.append(f"  - '{name[:60]}': o'lchov birligi '{raw}' SmartPOS ro'yxatida yo'q, "
+                                f"'{UNIT_MAP[key]}' deb yozildi — tekshiring")
             return UNIT_MAP[key]
 
     mapped = raw.strip()
@@ -278,6 +302,9 @@ def parse_price(text):
 
 
 def parse_vat(text):
+    if isinstance(text, (int, float)):
+        v = float(text)
+        return format(v * 100 if 0 < v <= 1 else v, ".2f")
     text = text.strip()
     if "без" in text.lower():
         return "Без НДС"
@@ -468,7 +495,368 @@ def report_event(kind, detail=""):
     threading.Thread(target=worker, daemon=True).start()
 
 
+# ---------------------------------------------------------------------------
+# Haqiqiy eski Excel (.xls, BIFF8) - kutubxonasiz o'qish
+# ---------------------------------------------------------------------------
+# Ba'zan hisob-faktura Excelda ochilib, haqiqiy .xls qilib saqlanadi (masalan
+# "товар остатка" ro'yxati). .exe ichida xlrd yo'q, shuning uchun bu yerda kichik
+# o'quvchi: OLE2 konteyner -> "Workbook" oqimi -> BIFF8 yozuvlari (matn, son,
+# formula natijasi). Faqat BIRINCHI varaq kerak.
+
+import struct as _struct
+
+_OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
+
+def _ole_stream(data, names=("Workbook", "Book")):
+    """OLE2 (Compound File) ichidan nomli oqimni qaytaradi."""
+    if data[:8] != _OLE_MAGIC:
+        raise ValueError("OLE2 fayl emas")
+    sec_size = 1 << _struct.unpack_from("<H", data, 30)[0]
+    mini_size = 1 << _struct.unpack_from("<H", data, 32)[0]
+    n_fat = _struct.unpack_from("<I", data, 44)[0]
+    dir_start = _struct.unpack_from("<i", data, 48)[0]
+    mini_cutoff = _struct.unpack_from("<I", data, 56)[0]
+    minifat_start = _struct.unpack_from("<i", data, 60)[0]
+    difat_start = _struct.unpack_from("<i", data, 68)[0]
+
+    def sector(i):
+        off = 512 + i * sec_size
+        return data[off:off + sec_size]
+
+    # FAT sektorlari ro'yxati (DIFAT): 109 tasi sarlavhada, qolgani zanjirda
+    fat_secs = [x for x in _struct.unpack_from("<109i", data, 76) if x >= 0]
+    d = difat_start
+    while d >= 0 and len(fat_secs) < n_fat:
+        s = sector(d)
+        vals = _struct.unpack("<%di" % (sec_size // 4), s)
+        fat_secs.extend(v for v in vals[:-1] if v >= 0)
+        d = vals[-1]
+    fat = []
+    for fs in fat_secs[:n_fat]:
+        fat.extend(_struct.unpack("<%di" % (sec_size // 4), sector(fs)))
+
+    def chain(start):
+        out, seen, i = [], set(), start
+        while 0 <= i < len(fat) and i not in seen:
+            seen.add(i)
+            out.append(sector(i))
+            i = fat[i]
+        return b"".join(out)
+
+    dirs = chain(dir_start)
+    entries = []
+    for k in range(0, len(dirs) - 127, 128):
+        e = dirs[k:k + 128]
+        nlen = _struct.unpack_from("<H", e, 64)[0]
+        name = e[:max(0, nlen - 2)].decode("utf-16-le", "ignore")
+        etype = e[66]
+        start = _struct.unpack_from("<i", e, 116)[0]
+        size = _struct.unpack_from("<I", e, 120)[0]
+        entries.append((name, etype, start, size))
+    root = next((e for e in entries if e[1] == 5), None)
+    for want in names:
+        for name, etype, start, size in entries:
+            if etype == 2 and name == want:
+                if size < mini_cutoff and root is not None:
+                    # kichik oqim - mini-sektorlarda
+                    ministream = chain(root[2])
+                    minifat = _struct.unpack("<%di" % (len(chain(minifat_start)) // 4), chain(minifat_start)) \
+                        if minifat_start >= 0 else ()
+                    out, i, seen = [], start, set()
+                    while 0 <= i < len(minifat) and i not in seen:
+                        seen.add(i)
+                        out.append(ministream[i * mini_size:(i + 1) * mini_size])
+                        i = minifat[i]
+                    return b"".join(out)[:size]
+                return chain(start)[:size]
+    raise ValueError("Excel fayl ichida 'Workbook' topilmadi")
+
+
+def _biff_records(wb, pos=0):
+    n = len(wb)
+    while pos + 4 <= n:
+        rtype, rlen = _struct.unpack_from("<HH", wb, pos)
+        yield pos, rtype, wb[pos + 4:pos + 4 + rlen]
+        pos += 4 + rlen
+
+
+def _rk(v):
+    if v & 2:
+        x = v >> 2
+        if x & 0x20000000:
+            x -= 0x40000000
+        val = float(x)
+    else:
+        val = _struct.unpack("<d", _struct.pack("<Q", (v & 0xFFFFFFFC) << 32))[0]
+    return val / 100.0 if v & 1 else val
+
+
+def _read_sst(chunks):
+    """SST - CONTINUE yozuvlari bilan bo'lingan umumiy matnlar jadvali."""
+    out = []
+    ci, off = 0, 8          # birinchi bo'lak: 4 bayt jami + 4 bayt noyob son
+    total = _struct.unpack_from("<I", chunks[0], 4)[0] if chunks and len(chunks[0]) >= 8 else 0
+
+    def need(nbytes):
+        nonlocal ci, off
+        if off + nbytes > len(chunks[ci]) and ci + 1 < len(chunks):
+            ci, off = ci + 1, 0
+
+    for _ in range(total):
+        if ci >= len(chunks):
+            break
+        need(3)
+        cch, flags = _struct.unpack_from("<HB", chunks[ci], off)
+        off += 3
+        high = flags & 1
+        rich = _struct.unpack_from("<H", chunks[ci], off)[0] if flags & 8 else 0
+        off += 2 if flags & 8 else 0
+        ext = _struct.unpack_from("<i", chunks[ci], off)[0] if flags & 4 else 0
+        off += 4 if flags & 4 else 0
+        parts, left = [], cch
+        while left > 0:
+            if off >= len(chunks[ci]):
+                ci += 1
+                if ci >= len(chunks):
+                    break
+                high = chunks[ci][0] & 1      # davomida belgi kengligi qayta beriladi
+                off = 1
+            w = 2 if high else 1
+            take = min(left, (len(chunks[ci]) - off) // w)
+            raw = chunks[ci][off:off + take * w]
+            parts.append(raw.decode("utf-16-le", "ignore") if high else raw.decode("latin-1"))
+            off += take * w
+            left -= take
+            if take == 0:
+                break
+        out.append("".join(parts))
+        skip = rich * 4 + ext
+        while skip > 0 and ci < len(chunks):
+            step = min(skip, len(chunks[ci]) - off)
+            off += step
+            skip -= step
+            if skip > 0:
+                ci, off = ci + 1, 0
+    return out
+
+
+def _biff_str(rec, off, len_bytes=2):
+    cch = _struct.unpack_from("<H" if len_bytes == 2 else "<B", rec, off)[0]
+    off += len_bytes
+    flags = rec[off]
+    off += 1
+    if flags & 8:
+        off += 2
+    if flags & 4:
+        off += 4
+    if flags & 1:
+        return rec[off:off + cch * 2].decode("utf-16-le", "ignore")
+    return rec[off:off + cch].decode("latin-1")
+
+
+def read_xls_grid(path):
+    """Birinchi varaqni katakchalar jadvali (qatorlar ro'yxati) qilib qaytaradi.
+    Katak qiymati: str yoki float (bo'sh - "")."""
+    with open(path, "rb") as fh:
+        data = fh.read()
+    try:
+        import xlrd  # .exe da bo'lsa - ishonchliroq
+        book = xlrd.open_workbook(file_contents=data)
+        sh = book.sheet_by_index(0)
+        return [[sh.cell_value(r, c) for c in range(sh.ncols)] for r in range(sh.nrows)]
+    except ImportError:
+        pass
+    wb = _ole_stream(data)
+    sst, sheet_pos, cur = [], None, None
+    for pos, rtype, rec in _biff_records(wb):
+        if rtype == 0x0085 and sheet_pos is None:          # BOUNDSHEET
+            if len(rec) > 5 and rec[5] == 0:               # oddiy varaq
+                sheet_pos = _struct.unpack_from("<I", rec, 0)[0]
+        elif rtype == 0x00FC:                              # SST
+            cur = [rec]
+        elif rtype == 0x003C and cur is not None:          # CONTINUE
+            cur.append(rec)
+        elif cur is not None and rtype != 0x003C:
+            sst = _read_sst(cur)
+            cur = None
+        if rtype == 0x000A and sheet_pos is not None and pos > sheet_pos:
+            break
+    if cur is not None:
+        sst = _read_sst(cur)
+    if sheet_pos is None:
+        raise ValueError("Excel faylda varaq topilmadi")
+
+    cells = {}
+    last_formula = None
+    for pos, rtype, rec in _biff_records(wb, sheet_pos):
+        if rtype == 0x000A:                                # EOF
+            break
+        if len(rec) < 6 and rtype not in (0x0207,):
+            continue
+        if rtype == 0x00FD:                                # LABELSST
+            r, c, _xf, i = _struct.unpack_from("<HHHI", rec)
+            cells[(r, c)] = sst[i] if i < len(sst) else ""
+        elif rtype == 0x0203:                              # NUMBER
+            r, c, _xf, v = _struct.unpack_from("<HHHd", rec)
+            cells[(r, c)] = v
+        elif rtype == 0x027E:                              # RK
+            r, c, _xf, v = _struct.unpack_from("<HHHI", rec)
+            cells[(r, c)] = _rk(v)
+        elif rtype == 0x00BD:                              # MULRK
+            r, c0 = _struct.unpack_from("<HH", rec)
+            n = (len(rec) - 6) // 6
+            for k in range(n):
+                v = _struct.unpack_from("<I", rec, 4 + k * 6 + 2)[0]
+                cells[(r, c0 + k)] = _rk(v)
+        elif rtype == 0x0204:                              # LABEL
+            r, c = _struct.unpack_from("<HH", rec)
+            cells[(r, c)] = _biff_str(rec, 6)
+        elif rtype == 0x0006:                              # FORMULA (natijasi)
+            r, c = _struct.unpack_from("<HH", rec)
+            res = rec[6:14]
+            if res[6:8] == b"\xff\xff":
+                last_formula = (r, c) if res[0] == 0 else None   # 0 - matn, keyin STRING
+                cells[(r, c)] = "" if res[0] != 1 else bool(res[2])
+            else:
+                cells[(r, c)] = _struct.unpack("<d", res)[0]
+                last_formula = None
+        elif rtype == 0x0207 and last_formula is not None:   # STRING
+            cells[last_formula] = _biff_str(rec, 0)
+            last_formula = None
+    if not cells:
+        return []
+    nr = max(r for r, _ in cells) + 1
+    nc = max(c for _, c in cells) + 1
+    grid = [[""] * nc for _ in range(nr)]
+    for (r, c), v in cells.items():
+        grid[r][c] = v
+    return grid
+
+
+def read_xlsx_grid(path):
+    """Yangi Excel (.xlsx) - birinchi varaq."""
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    try:
+        ws = wb.worksheets[0]
+        try:
+            ws.reset_dimensions()
+        except AttributeError:
+            pass
+        return [["" if v is None else v for v in row] for row in ws.iter_rows(values_only=True)]
+    finally:
+        wb.close()
+
+
+def _cell_str(v):
+    """Excel katagi -> matn (son bo'lsa ".0" siz, ilmiy ko'rinishsiz)."""
+    if v is None:
+        return ""
+    if isinstance(v, bool):
+        return "Да" if v else ""
+    if isinstance(v, float):
+        return str(int(v)) if v.is_integer() else repr(v)
+    return str(v).strip()
+
+
+def _is_total_row(cells):
+    first = " ".join(_cell_str(c) for c in cells[:3]).strip().lower()
+    return first.startswith(("жами", "итого", "jami", "всего"))
+
+
+def _parse_grid(grid, fname=""):
+    """Excel jadvalidan (haqiqiy .xls / .xlsx) tovarlar - HTML bilan bir xil natija."""
+    hi = None
+    for i, row in enumerate(grid[:60]):
+        if any(("маҳсулот" in _cell_str(c).lower() or "наименование" in _cell_str(c).lower()) for c in row):
+            hi = i
+            break
+    if hi is None:
+        raise ParseError(
+            "Faylda tovarlar jadvali topilmadi: 'Маҳсулот номи' (yoki 'Наименование') "
+            "ustuni yo'q. Hisob-faktura yoki tovar ro'yxati ekanini tekshiring.",
+            diagnostic=f"{fname}: birinchi qatorlar: " + " / ".join(
+                " | ".join(_cell_str(c)[:30] for c in r if _cell_str(c)) for r in grid[:8]))
+    header_map = {}
+    for c, v in enumerate(grid[hi]):
+        label = _cell_str(v)
+        if label and label not in header_map:
+            header_map[label] = c
+    idx = _resolve_field_indices(header_map)
+    missing_required = [f for f in ("name", "price") if f not in idx]
+    if missing_required:
+        raise ParseError(
+            "Jadval sarlavhasida quyidagi ustunlar topilmadi: " + ", ".join(missing_required)
+            + ". Fayl tuzilishi kutilganidan farq qiladi — namuna sifatida yuboring.",
+            diagnostic="topilgan sarlavhalar: " + ", ".join(header_map.keys()))
+
+    def raw(row, field):
+        i = idx.get(field)
+        return row[i] if i is not None and i < len(row) else ""
+
+    items, warnings = [], []
+    for row in grid[hi + 1:]:
+        name = _cell_str(raw(row, "name"))
+        if not name or _is_total_row(row):
+            continue
+        # sarlavha ostidagi "1 | 2 | 3 ..." raqamlash qatori
+        if name.isdigit() and _cell_str(row[0]) in ("", "1") and len(name) <= 2:
+            continue
+        price_v = raw(row, "price")
+        price = format(float(price_v), ".2f") if isinstance(price_v, (int, float)) and not isinstance(price_v, bool) \
+            else parse_price(_cell_str(price_v))
+        if price is None:
+            # Excelda tor ustun "##########" bo'lib saqlangan narx - summa / miqdor
+            amount_v, qty_v = raw(row, "amount"), raw(row, "qty")
+            try:
+                amount_f = float(amount_v) if isinstance(amount_v, (int, float)) else float(parse_price(_cell_str(amount_v)))
+                qty_f = float(qty_v) if isinstance(qty_v, (int, float)) else float(parse_price(_cell_str(qty_v)))
+            except (TypeError, ValueError):
+                continue
+            if not qty_f:
+                continue
+            price = format(amount_f / qty_f, ".2f")
+            warnings.append(f"  - '{name[:60]}': narx katagi '{_cell_str(price_v)[:20]}' - "
+                            f"'Етказиб бериш қиймати' / miqdor dan hisoblandi: {price}")
+        ikpu_v = raw(row, "ikpu")
+        if isinstance(ikpu_v, float) and ikpu_v.is_integer():
+            ikpu = str(int(ikpu_v)).zfill(17)     # boshidagi 0 son bo'lib yo'qolmasin
+        else:
+            ikpu = extract_ikpu(_cell_str(ikpu_v)) if _cell_str(ikpu_v) else ""
+        unit_raw = _cell_str(raw(row, "unit"))
+        vat_v = raw(row, "vat")
+        barcode = _cell_str(raw(row, "barcode"))
+        items.append({
+            "name": name,
+            "barcode": barcode or DEFAULT_BARCODE,
+            "unit": map_unit(unit_raw, warnings, name) if unit_raw else "штук",
+            "price": price,
+            "vat": parse_vat(vat_v) if _cell_str(vat_v) else "12.00",
+            "favourite": "Да",
+            "marking": "Да" if _cell_str(raw(row, "marking")) == "Маркировкаланган" else "Нет",
+            "ikpu": ikpu,
+            "classifier_code": None,
+        })
+    if not items:
+        raise ParseError("Jadval topildi, lekin birorta tovar satri o'qilmadi (narxi yo'q?).",
+                         diagnostic=f"{fname}: sarlavha qatori {hi}, ustunlar: {idx}")
+    if not idx.get("unit"):
+        warnings.append("  DIQQAT: bu faylda 'Ўлчов бирлиги' ustuni topilmadi, hammasiga 'штук' qo'yildi.")
+    if not idx.get("vat"):
+        warnings.append("  DIQQAT: bu faylda 'ҚҚС' ustuni topilmadi, hammasiga '12.00' qo'yildi.")
+    if not idx.get("ikpu"):
+        warnings.append("  DIQQAT: bu faylda ИКПУ ustuni topilmadi — bo'sh qoldirildi, saytga yuklashdan oldin tekshiring.")
+    return items, warnings
+
+
 def parse_invoice(path):
+    with open(path, "rb") as fh:
+        head = fh.read(8)
+    if head == _OLE_MAGIC:
+        # Excelda ochilib haqiqiy .xls qilib saqlangan faktura / qoldiq ro'yxati
+        return _parse_grid(read_xls_grid(path), os.path.basename(path))
+    if head[:2] == b"PK":
+        return _parse_grid(read_xlsx_grid(path), os.path.basename(path))
     with open(path, encoding="utf-8", errors="ignore") as fh:
         html = fh.read()
     soup = BeautifulSoup(html, "html.parser")
@@ -500,12 +888,16 @@ def parse_invoice(path):
     warnings = []
     for tr in rows:
         cells = [c.get_text(strip=True) for c in tr.find_all(["td", "th"])]
-        if not cells or not cells[0].strip().isdigit():
-            continue  # "Жами" jami qatori yoki bo'sh qator
-
+        if not cells:
+            continue
         name = get(cells, "name")
         if not name:
             continue
+        # № ustuni bo'sh bo'lishi mumkin ("товар остатка" ro'yxatlarida) - shunda
+        # narxi o'qiladigan qator tovar hisoblanadi; "Жами" qatori tashlab ketiladi
+        if not cells[0].strip().isdigit():
+            if _is_total_row(cells) or parse_price(get(cells, "price")) is None:
+                continue
         marking_raw = get(cells, "marking")
         ikpu_raw = get(cells, "ikpu")
         barcode = get(cells, "barcode").strip()
