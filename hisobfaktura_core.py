@@ -13,7 +13,7 @@ Bu fayl GitHub'da saqlanadi va launcher.py orqali har ishga tushganda
 avtomatik yangilanadi — bu yerni tahrirlash = barcha foydalanuvchilarning
 dasturi keyingi ochilishda yangilanadi degani.
 """
-__version__ = "2026-10-02.1"
+__version__ = "2026-10-08.1"
 
 import os
 import re
@@ -115,6 +115,23 @@ UNIT_MAP = {
     "nabor": "комплект / набор",
     # SmartPOS ro'yxatida "лист" yo'q - ЛДСП/ДСП listlari donalab sotiladi
     "лист": "штук", "varaq": "штук", "list": "штук",
+    # 2026-10-08: o'zbekcha KIRILL yozuvidagi fakturalar (tasnif "дона (истеъмол қутиси)").
+    # Ilgari faqat lotin "dona" bor edi - "дона" o'zgarishsiz ketib, SmartPOS
+    # "Единица измерения неверна" deb qaytarardi.
+    "дона": "штук", "донa": "штук",
+    "тўплам": "комплект", "туплам": "комплект",
+    "қути": "коробка", "кути": "коробка", "қутича": "коробка",
+    "жуфт": "пара",
+    "қоп": "мешок", "пакет": "мешок",
+    "соат": "часы",
+    "фоиз": "проценты",
+    "киши": "человек",
+    "килограмм": "килограмм", "грамм": "грамм", "г": "грамм", "тонна": "тонна",
+    "литр": "литр", "миллилитр": "миллилитр", "мл": "миллилитр",
+    "метр": "метр", "м": "метр", "погон метр": "пг. м.", "пог. м": "пг. м.",
+    "квадрат метр": "кв. м.", "кв.м": "кв. м.", "кв. м": "кв. м.", "м2": "кв. м.",
+    "куб метр": "куб.м", "куб.метр": "куб.м", "м3": "куб.м",
+    "блок": "блок", "банка": "банка", "флакон": "флакон", "пачка": "пачка",
 }
 
 # Taxminiy moslik - ogohlantirish bilan (buxgalter tekshirsin)
