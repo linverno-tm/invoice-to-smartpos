@@ -13,10 +13,11 @@ Bu fayl GitHub'da saqlanadi va launcher.py orqali har ishga tushganda
 avtomatik yangilanadi — bu yerni tahrirlash = barcha foydalanuvchilarning
 dasturi keyingi ochilishda yangilanadi degani.
 """
-__version__ = "2026-10-08.1"
+__version__ = "2026-10-23.1"
 
 import os
 import re
+import hashlib
 import sys
 import json
 import threading
@@ -69,7 +70,26 @@ UNITS = [
 VATS = ["Без НДС", "6.00", "0.00", "12.00"]
 FAVOURITES = ["Да", "Нет"]
 
-DEFAULT_BARCODE = "1111111111111"  # shtrix kodi yo'q tovarlar uchun (13 ta "1")
+# 2026-10-23: shtrix kodi yo'q tovarlarga avval hammasiga bir xil
+# "1111111111111" qo'yilardi. SmartPOS katalogida bu kod bilan juda ko'p
+# kartochka to'planib qolgani uchun import "Товар совпал с несколькими
+# карточками каталога" deb to'xtay boshladi. Endi har tovarga nomidan
+# doimiy ichki kod yasaladi (pastdagi make_barcode).
+
+
+def make_barcode(name):
+    """Shtrix kodi yo'q tovar uchun nomidan doimiy EAN-13 ichki kod.
+
+    "2" bilan boshlanadi (do'kon ichki kodlari uchun ajratilgan oraliq,
+    haqiqiy zavod kodlari bilan to'qnashmaydi), 13-raqami EAN tekshiruv
+    raqami. Bir xil nom (katta-kichik harf, ortiqcha bo'shliqlar farqsiz)
+    har doim bir xil kod oladi — qayta yuklaganda yangi kartochka ochilmaydi.
+    """
+    norm = " ".join(str(name or "").lower().split())
+    digest = int(hashlib.sha1(norm.encode("utf-8")).hexdigest(), 16)
+    body = "2" + str(digest % 10 ** 11).zfill(11)
+    total = sum(int(d) * (3 if i % 2 else 1) for i, d in enumerate(body))
+    return body + str((10 - total % 10) % 10)
 
 # hisob-fakturadagi lotin/o'zbekcha o'lchov birliklarini sayt kutgan
 # rus tilidagi nomlarga moslash. Kerak bo'lsa shu ro'yxatga qo'shib boring.
@@ -845,7 +865,7 @@ def _parse_grid(grid, fname=""):
         barcode = _cell_str(raw(row, "barcode"))
         items.append({
             "name": name,
-            "barcode": barcode or DEFAULT_BARCODE,
+            "barcode": barcode or make_barcode(name),
             "unit": map_unit(unit_raw, warnings, name) if unit_raw else "штук",
             "price": price,
             "vat": parse_vat(vat_v) if _cell_str(vat_v) else "12.00",
@@ -924,7 +944,7 @@ def parse_invoice(path):
 
         items.append({
             "name": name,
-            "barcode": barcode or DEFAULT_BARCODE,
+            "barcode": barcode or make_barcode(name),
             "unit": map_unit(unit_raw, warnings, name) if unit_raw else "штук",
             "price": parse_price(price_raw),
             "vat": parse_vat(vat_raw) if vat_raw else "12.00",
@@ -1436,7 +1456,7 @@ Versiya: {__version__}
         name_entry = ttk.Entry(form, font=FONT)
         name_entry.pack(fill="x")
 
-        field("Shtrix kod (bo'sh — avtomatik 1111111111111)")
+        field("Shtrix kod (bo'sh — nomidan avtomatik ichki kod)")
         barcode_entry = ttk.Entry(form, font=FONT)
         barcode_entry.pack(fill="x")
 
@@ -1514,7 +1534,7 @@ Versiya: {__version__}
                 error_label.config(text="Narx noto'g'ri formatda.")
                 return
 
-            barcode = barcode_entry.get().strip() or DEFAULT_BARCODE
+            barcode = barcode_entry.get().strip() or make_barcode(name)
             ikpu = ikpu_entry.get().strip()
             item = {
                 "name": name,
