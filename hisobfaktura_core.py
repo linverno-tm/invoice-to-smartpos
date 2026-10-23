@@ -13,7 +13,7 @@ Bu fayl GitHub'da saqlanadi va launcher.py orqali har ishga tushganda
 avtomatik yangilanadi — bu yerni tahrirlash = barcha foydalanuvchilarning
 dasturi keyingi ochilishda yangilanadi degani.
 """
-__version__ = "2026-10-23.3"
+__version__ = "2026-10-23.4"
 
 import os
 import re
@@ -213,6 +213,8 @@ def _resolve_field_indices(header_map):
             claim("barcode", col)
         elif "ўлчов" in low or "измерен" in low:
             claim("unit", col)
+        elif "келиб чиқ" in low or "kelib chiq" in low or "происхожд" in low:
+            claim("origin", col)
         elif "миқдор" in low or "количество" in low:
             claim("qty", col)
         elif "нарҳ" in low or "нарх" in low or low.strip() == "цена":
@@ -871,6 +873,7 @@ def _parse_grid(grid, fname=""):
             "vat": parse_vat(vat_v) if _cell_str(vat_v) else "12.00",
             "favourite": "Да",
             "marking": "Да" if _cell_str(raw(row, "marking")) == "Маркировкаланган" else "Нет",
+            "origin": map_origin(_cell_str(raw(row, "origin"))),
             "ikpu": ikpu,
             "classifier_code": None,
         })
@@ -989,6 +992,7 @@ def parse_invoice(path):
             "vat": parse_vat(vat_raw) if vat_raw else "12.00",
             "favourite": "Да",
             "marking": "Да" if marking_raw.strip() == "Маркировкаланган" else "Нет",
+            "origin": map_origin(get(cells, "origin")),
             "ikpu": extract_ikpu(ikpu_raw) if ikpu_raw else "",
             "classifier_code": None,
         })
@@ -1043,6 +1047,91 @@ def write_product_list(items, out_path):
     dv_vats.add("E2:E1001")
     dv_fav.add("F2:G1001")
 
+    wb.save(out_path)
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-23: umumiy ИКПУ'li tovarlar - qo'lda qo'shish ro'yxati.
+# SmartPOS fayl importida tovarni do'kondagi tovarlar bilan ИКПУ bo'yicha
+# solishtiradi. Umumiy ИКПУ (brend/model ko'rsatilmagan, oxiri 000000,
+# masalan telefonlar 08517001001000000) bilan do'konda bir nechta tovar bo'lsa,
+# import "Товар совпал с несколькими карточками каталога" deb rad etadi.
+# Bunday tovarlar kabinetdagi "Добавить товар" formasi orqali qo'shiladi.
+# ---------------------------------------------------------------------------
+
+def map_origin(text):
+    """Fakturadagi "Товарни келиб чиқиши" -> SmartPOS "Происхождение товара"."""
+    low = (text or "").lower()
+    if "ишлаб чиқар" in low or "ishlab chiqar" in low or "производ" in low:
+        return "Производитель"
+    if "хизмат" in low or "xizmat" in low or "услуг" in low:
+        return "Услуга"
+    return "Куплено"          # "Олди-сотди" va bo'sh - sotib olingan tovar
+
+
+def is_generic_ikpu(ikpu):
+    """Brend va model ko'rsatilmagan umumiy ИКПУ (oxirgi 6 raqami 000000)."""
+    ikpu = str(ikpu or "")
+    return len(ikpu) == 17 and ikpu.isdigit() and ikpu.endswith("000000")
+
+
+def fetch_form_package(ikpu, timeout=8):
+    """"Добавить товар" formasidagi "Ед. изм-я (Tasnif)" uchun qadoq.
+
+    Forma asosiy birlikni ("шт.", ota kodi yo'q) ko'rsatmaydi - faqat
+    qadoqlarni ("изделия=1 шт. -- 1653507"). Oddiy, ko'paytiruvchisiz
+    qadoq olinadi, "изделия" bo'lsa - shu. Qaytaradi: matn yoki "".
+    """
+    try:
+        url = f"{IKPU_API_URL}?mxikCode={ikpu}&lang=ru"
+        req = urllib.request.Request(url, headers={"User-Agent": "HisobFaktura2ProductList"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            packages = json.load(resp).get("packages") or []
+    except Exception:  # noqa: BLE001
+        return ""
+    cands = [p for p in packages if p.get("parentCode") and p.get("code")]
+    if not cands:
+        return ""
+    simple = [p for p in cands if "*" not in (p.get("name") or "")]
+    izd = [p for p in simple if (p.get("containerName") or "").strip().lower() == "изделия"]
+    best = izd[0] if izd else _pick_best_package(simple or cands)
+    return f"{best.get('containerName') or ''}={(best.get('name') or '').strip()} -- {best['code']}"
+
+
+def form_price(price):
+    """"3234500.00" -> "3234500" (formaga shunday yoziladi)."""
+    txt = str(price or "").strip()
+    return txt[:-3] if txt.endswith(".00") else txt
+
+
+MANUAL_HEADERS = [
+    "№", "Название продукции", "Штрихкод", "ИКПУ", "Цена продажи",
+    "Ед. изм-я (Tasnif)", "Ед. изм-я (SMARTPOS TRADE)", "НДС",
+    "Происхождение товара", "Избранный", "Маркированный",
+]
+
+
+def write_manual_list(items, out_path):
+    """Qo'lda qo'shiladigan tovarlar - "Добавить товар" formasi tartibida."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Qo'lda qo'shish"
+    ws.append(MANUAL_HEADERS)
+    for n, it in enumerate(items, 1):
+        vat = it.get("vat") or ""
+        vat_txt = "Без НДС" if "без" in str(vat).lower() else "НДС - %s%%" % str(vat).replace(".00", "")
+        ws.append([
+            n, it["name"], it["barcode"], it["ikpu"], form_price(it["price"]),
+            it.get("form_package") or "", "шт" if it["unit"] == "штук" else it["unit"],
+            vat_txt, it.get("origin") or "Куплено",
+            it.get("favourite") or "Да", it.get("marking") or "Нет",
+        ])
+    for col, w in zip("ABCDEFGHIJK", (5, 48, 16, 20, 14, 30, 14, 12, 16, 10, 13)):
+        ws.column_dimensions[col].width = w
+    for row in ws.iter_rows(min_row=2):
+        for c in row:
+            c.number_format = "@"          # shtrix-kod va ИКПУ matn bo'lib qolsin
+    ws.freeze_panes = "A2"
     wb.save(out_path)
 
 
