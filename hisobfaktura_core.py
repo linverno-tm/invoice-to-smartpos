@@ -13,7 +13,7 @@ Bu fayl GitHub'da saqlanadi va launcher.py orqali har ishga tushganda
 avtomatik yangilanadi — bu yerni tahrirlash = barcha foydalanuvchilarning
 dasturi keyingi ochilishda yangilanadi degani.
 """
-__version__ = "2026-10-23.4"
+__version__ = "2026-10-23.5"
 
 import os
 import re
@@ -1111,12 +1111,33 @@ MANUAL_HEADERS = [
 ]
 
 
+MANUAL_TITLE = "SmartPOS'ga YUKLANMAYDI (\"Загрузить шаблон\" emas!) - \"Добавить товар\" formasi uchun ro'yxat"
+MANUAL_STEPS = ("Tartib: bo'lim (masalan, Телефонлар) → ⋮ → Добавить товар → yuqoriga ИКПУ ni yozib qidiring → "
+                "nom, shtrix-kod, narxni yozing → Ед. изм-я (Tasnif), SMARTPOS, НДС, Происхождение ni tanlang → Добавить. "
+                "Sabab: umumiy ИКПУ bilan do'konda bir nechta tovar bo'lsa, SmartPOS fayl importini rad etadi.")
+
+
 def write_manual_list(items, out_path):
-    """Qo'lda qo'shiladigan tovarlar - "Добавить товар" formasi tartibida."""
+    """Qo'lda qo'shiladigan tovarlar - "Добавить товар" formasi tartibida.
+    Birinchi ikki qator - ogohlantirish va tartib (fayl adashib importga
+    yuklanmasin), 3-qator - sarlavha."""
+    from openpyxl.styles import Font, PatternFill, Alignment
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.title = "Qo'lda qo'shish"
+    ws.title = "Добавить товар"
+    ws.append([MANUAL_TITLE])
+    ws.append([MANUAL_STEPS])
     ws.append(MANUAL_HEADERS)
+    last = openpyxl.utils.get_column_letter(len(MANUAL_HEADERS))
+    for r in (1, 2):
+        ws.merge_cells(f"A{r}:{last}{r}")
+        ws[f"A{r}"].alignment = Alignment(wrap_text=True, vertical="center")
+    ws["A1"].font = Font(bold=True, size=14, color="FFFFFF")
+    ws["A1"].fill = PatternFill("solid", fgColor="C62828")
+    ws.row_dimensions[1].height = 28
+    ws.row_dimensions[2].height = 48
+    for c in ws[3]:
+        c.font = Font(bold=True)
     for n, it in enumerate(items, 1):
         vat = it.get("vat") or ""
         vat_txt = "Без НДС" if "без" in str(vat).lower() else "НДС - %s%%" % str(vat).replace(".00", "")
@@ -1128,10 +1149,10 @@ def write_manual_list(items, out_path):
         ])
     for col, w in zip("ABCDEFGHIJK", (5, 48, 16, 20, 14, 30, 14, 12, 16, 10, 13)):
         ws.column_dimensions[col].width = w
-    for row in ws.iter_rows(min_row=2):
+    for row in ws.iter_rows(min_row=4):
         for c in row:
             c.number_format = "@"          # shtrix-kod va ИКПУ matn bo'lib qolsin
-    ws.freeze_panes = "A2"
+    ws.freeze_panes = "A4"
     wb.save(out_path)
 
 
