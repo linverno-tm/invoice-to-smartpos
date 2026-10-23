@@ -13,7 +13,7 @@ Bu fayl GitHub'da saqlanadi va launcher.py orqali har ishga tushganda
 avtomatik yangilanadi — bu yerni tahrirlash = barcha foydalanuvchilarning
 dasturi keyingi ochilishda yangilanadi degani.
 """
-__version__ = "2026-10-23.5"
+__version__ = "2026-10-23.6"
 
 import os
 import re
@@ -1153,6 +1153,56 @@ def write_manual_list(items, out_path):
         for c in row:
             c.number_format = "@"          # shtrix-kod va ИКПУ matn bo'lib qolsin
     ws.freeze_panes = "A4"
+    wb.save(out_path)
+
+
+# 2026-10-23: SmartPOS kabinetidagi "Скачать шаблон" beradigan RASMIY shablon
+# (product_list_template.xlsx) - 11 ustun, birinchisi "ID" (yangi tovar uchun
+# bo'sh), oxirgisi "ИНН/ПИНФЛ комитента". Varaqlar, nomlangan ro'yxatlar,
+# tanlash ro'yxatlari va ustun kengliklari asl shablon bilan bir xil.
+HEADERS_REF = [
+    "ID", "Название товара", "Штрих код", "Ед. измерения", "Цена", "НДС %",
+    "Избранное", "Маркировка", "ИКПУ", "Код ед. измерения тасниф",
+    "ИНН/ПИНФЛ комитента",
+]
+_REF_WIDTHS = {"A": 15.625, "B": 23.4375, "C": 23.4375, "D": 15.625, "E": 23.4375, "F": 15.625,
+               "G": 15.625, "H": 19.53125, "I": 23.4375, "J": 23.4375, "K": 23.4375}
+
+
+def write_product_list_ref(items, out_path):
+    """SmartPOS rasmiy shabloni (11 ustun) - "Загрузить шаблон" uchun."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Продукты"
+    ws.append(HEADERS_REF)
+    for it in items:
+        ws.append([
+            None, it["name"], it["barcode"], it["unit"], it["price"], it["vat"],
+            it["favourite"], it["marking"], it["ikpu"], it["classifier_code"], None,
+        ])
+    for col, w in _REF_WIDTHS.items():
+        ws.column_dimensions[col].width = w
+    for row in ws.iter_rows(min_row=2):
+        for c in row:
+            if c.column_letter in "CIJK":
+                c.number_format = "@"      # asl shablonda ham shu ustunlar matn
+
+    ref = wb.create_sheet("Справочник")
+    for i, u in enumerate(UNITS, start=1):
+        ref.cell(row=i, column=1, value=u)
+    for i, v in enumerate(VATS, start=1):
+        ref.cell(row=i, column=2, value=v)
+    for i, f in enumerate(FAVOURITES, start=1):
+        ref.cell(row=i, column=3, value=f)
+    DN = openpyxl.workbook.defined_name.DefinedName
+    wb.defined_names["Units"] = DN("Units", attr_text=f"Справочник!$A$1:$A${len(UNITS)}")
+    wb.defined_names["Vats"] = DN("Vats", attr_text=f"Справочник!$B$1:$B${len(VATS)}")
+    wb.defined_names["Favourites"] = DN("Favourites", attr_text=f"Справочник!$C$1:$C${len(FAVOURITES)}")
+    for formula, rng in (("Units", "D2:D1001"), ("Vats", "F2:F1001"),
+                         ("Favourites", "G2:G1001"), ("Favourites", "H2:H1001")):
+        dv = DataValidation(type="list", formula1=formula, allow_blank=True)
+        ws.add_data_validation(dv)
+        dv.add(rng)
     wb.save(out_path)
 
 
