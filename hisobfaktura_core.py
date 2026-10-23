@@ -186,10 +186,20 @@ def _parse_header_row(tr):
     return mapping
 
 
-def _find_header_map(thead):
+def _is_name_header(text):
+    return "маҳсулот" in text or "наименование" in text
+
+
+# 2026-10-23: ba'zi fakturalarda nom ustuni "Товар (иш, хизмат) номи" deb yoziladi
+# ("Маҳсулот" so'zi umuman yo'q). Faqat asosiy qidiruv hech narsa topmaganda ishlatiladi.
+def _is_tovar_name_header(text):
+    return bool(re.search(r"товар\s*\(иш,\s*хизмат\)\s*номи", text))
+
+
+def _find_header_map(thead, is_header=_is_name_header):
     for tr in thead.find_all("tr"):
         text = tr.get_text().lower()
-        if "маҳсулот" in text or "наименование" in text:
+        if is_header(text):
             return _parse_header_row(tr)
     return None
 
@@ -223,10 +233,15 @@ def _resolve_field_indices(header_map):
             claim("amount", col)       # "Етказиб бериш қиймати" = миқдор x нарҳ (ҚҚС сиз)
         elif "ққс" in low or "ндс" in low:
             claim("vat", col)
+    if "name" not in idx:
+        for label, col in header_map.items():
+            if _is_tovar_name_header(label.lower()):
+                claim("name", col)
+                break
     return idx
 
 
-def _find_item_table(soup):
+def _find_item_table(soup, is_header=_is_name_header):
     """Hisob-faktura jadvalini qidiradi.
 
     Ikki xil tuzilishni qo'llab-quvvatlaydi:
@@ -242,7 +257,7 @@ def _find_item_table(soup):
         thead = table.find("thead")
         tbody = table.find("tbody")
         if thead is not None and tbody is not None:
-            header_map = _find_header_map(thead)
+            header_map = _find_header_map(thead, is_header)
             if header_map:
                 return header_map, tbody.find_all("tr", recursive=False)
 
@@ -251,7 +266,7 @@ def _find_item_table(soup):
         header_map = None
         for i, tr in enumerate(direct_rows):
             text = tr.get_text().lower()
-            if "маҳсулот" in text or "наименование" in text:
+            if is_header(text):
                 candidate = _parse_header_row(tr)
                 if candidate:
                     header_idx, header_map = i, candidate
@@ -940,6 +955,8 @@ def parse_invoice(path):
         html = fh.read()
     soup = BeautifulSoup(html, "html.parser")
     header_map, rows = _find_item_table(soup)
+    if rows is None:
+        header_map, rows = _find_item_table(soup, _is_tovar_name_header)
     if rows is None:
         raise ParseError(
             "Hisob-faktura jadvali topilmadi. Fayl kutilgan '.xls (HTML)' "
