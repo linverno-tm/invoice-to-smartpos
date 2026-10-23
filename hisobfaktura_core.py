@@ -13,7 +13,7 @@ Bu fayl GitHub'da saqlanadi va launcher.py orqali har ishga tushganda
 avtomatik yangilanadi — bu yerni tahrirlash = barcha foydalanuvchilarning
 dasturi keyingi ochilishda yangilanadi degani.
 """
-__version__ = "2026-10-23.1"
+__version__ = "2026-10-23.2"
 
 import os
 import re
@@ -886,6 +886,50 @@ def _parse_grid(grid, fname=""):
     return items, warnings
 
 
+# 2026-10-23: 15 ustunli shablondagi "Название Магазина" bo'sh qolsa SmartPOS
+# importni "Ошибка" deb rad etadi. Do'kon nomi qo'lda kiritilmasa, fakturadagi
+# xaridordan olinadi (parse_buyer + store_from_buyer).
+_BUYER_LABELS = ("сотиб олувчи", "покупатель", "sotib oluvchi", "xaridor")
+_BUYER_TIN_LABELS = ("сотиб олувчининг стир", "инн покупателя", "sotib oluvchining stir")
+_PATRONYMIC_ENDS = ("ogli", "o'g'li", "qizi", "ўғли", "қизи", "угли", "кизи", "оглы", "кызы")
+
+
+def _invoice_cells(path):
+    """Faktura kataklari matni hujjatdagi tartibda (HTML, .xls, .xlsx)."""
+    with open(path, "rb") as fh:
+        head = fh.read(8)
+    if head == _OLE_MAGIC or head[:2] == b"PK":
+        grid = read_xls_grid(path) if head == _OLE_MAGIC else read_xlsx_grid(path)
+        return [_cell_str(c) for row in grid[:60] for c in row]
+    with open(path, encoding="utf-8", errors="ignore") as fh:
+        soup = BeautifulSoup(fh.read(), "html.parser")
+    return [c.get_text(" ", strip=True) for c in soup.find_all(["td", "th"])]
+
+
+def parse_buyer(path):
+    """Fakturadagi xaridor: (nomi, СТИР). Topilmasa bo'sh satrlar."""
+    cells = [c for c in _invoice_cells(path) if c]
+    name = tin = ""
+    for i, c in enumerate(cells[:-1]):
+        label = c.lower().rstrip(": ").strip()
+        if not name and label in _BUYER_LABELS:
+            name = cells[i + 1]
+        elif not tin and any(label.startswith(t) for t in _BUYER_TIN_LABELS):
+            tin = re.sub(r"\D", "", cells[i + 1])
+    return name.strip(), tin
+
+
+def store_from_buyer(name, tin=""):
+    """Xaridor nomidan SmartPOS do'kon nomi: yakka tadbirkor (14 xonali
+    ЖШШИР yoki otasining ismi bilan) - familiya va ism ("KARIMOV IZZATBEK
+    ZAFARBEK O'G'LI" -> "KARIMOV IZZATBEK"), korxona - nomi o'zgarishsiz."""
+    words = name.replace('"', " ").split()
+    last = re.sub(r"[‘’'`ʻʼ]", "'", words[-1].lower()) if words else ""
+    if len(words) >= 3 and (len(tin) == 14 or last in _PATRONYMIC_ENDS):
+        return " ".join(words[:2])
+    return " ".join(name.split())
+
+
 def parse_invoice(path):
     with open(path, "rb") as fh:
         head = fh.read(8)
@@ -1052,7 +1096,7 @@ def write_product_list_v2(items, out_path, store_name=""):
             "",                       # Комиссионный инн
             "",                       # Пинфл
             "0",                      # Тип владельца продукта/услуги
-            store_name,
+            it.get("store") or store_name,   # fakturadan olingan do'kon nomi ustun
             price_v2,
             vat_v2,
         ])
