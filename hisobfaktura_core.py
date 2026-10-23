@@ -13,7 +13,7 @@ Bu fayl GitHub'da saqlanadi va launcher.py orqali har ishga tushganda
 avtomatik yangilanadi — bu yerni tahrirlash = barcha foydalanuvchilarning
 dasturi keyingi ochilishda yangilanadi degani.
 """
-__version__ = "2026-10-23.2"
+__version__ = "2026-10-23.3"
 
 import os
 import re
@@ -891,7 +891,6 @@ def _parse_grid(grid, fname=""):
 # xaridordan olinadi (parse_buyer + store_from_buyer).
 _BUYER_LABELS = ("сотиб олувчи", "покупатель", "sotib oluvchi", "xaridor")
 _BUYER_TIN_LABELS = ("сотиб олувчининг стир", "инн покупателя", "sotib oluvchining stir")
-_PATRONYMIC_ENDS = ("ogli", "o'g'li", "qizi", "ўғли", "қизи", "угли", "кизи", "оглы", "кызы")
 
 
 def _invoice_cells(path):
@@ -920,14 +919,10 @@ def parse_buyer(path):
 
 
 def store_from_buyer(name, tin=""):
-    """Xaridor nomidan SmartPOS do'kon nomi: yakka tadbirkor (14 xonali
-    ЖШШИР yoki otasining ismi bilan) - familiya va ism ("KARIMOV IZZATBEK
-    ZAFARBEK O'G'LI" -> "KARIMOV IZZATBEK"), korxona - nomi o'zgarishsiz."""
-    words = name.replace('"', " ").split()
-    last = re.sub(r"[‘’'`ʻʼ]", "'", words[-1].lower()) if words else ""
-    if len(words) >= 3 and (len(tin) == 14 or last in _PATRONYMIC_ENDS):
-        return " ".join(words[:2])
-    return " ".join(name.split())
+    """Xaridor nomidan SmartPOS do'kon (filial) nomi - fakturadagidek to'liq.
+    2026-10-23: SmartPOS kabinetida yakka tadbirkor filiali to'liq nom bilan
+    turadi ("KARIMOV IZZATBEK ZAFARBEK O'G'LI"), qisqartirilmaydi."""
+    return " ".join(str(name or "").split())
 
 
 def parse_invoice(path):
